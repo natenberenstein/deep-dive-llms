@@ -26,10 +26,29 @@ graph TD
     D --> D2[Scaling Laws]
     D --> D3[In-Context Learning]
 
+    A --> E[Prompting]
+    A --> F[Evaluation]
+    A --> G[Inference]
+
+    E --> E1[Chain-of-Thought]
+    E --> E2[Few-Shot / Zero-Shot]
+    E --> E3[Tree-of-Thought]
+
+    F --> F1[Benchmarks - MMLU, HumanEval]
+    F --> F2[Human Evaluation]
+    F --> F3[Eval Frameworks - HELM]
+
+    G --> G1[Quantization]
+    G --> G2[KV Caching]
+    G --> G3[Speculative Decoding]
+
     style A fill:#4a90d9,stroke:#2c5f8a,color:#fff
     style B fill:#6aacf0,stroke:#4a8ad0,color:#fff
     style C fill:#6aacf0,stroke:#4a8ad0,color:#fff
     style D fill:#6aacf0,stroke:#4a8ad0,color:#fff
+    style E fill:#6aacf0,stroke:#4a8ad0,color:#fff
+    style F fill:#6aacf0,stroke:#4a8ad0,color:#fff
+    style G fill:#6aacf0,stroke:#4a8ad0,color:#fff
 ```
 
 ## Pages in This Section
@@ -38,8 +57,16 @@ graph TD
 |---|---|
 | [How LLMs Work](how-llms-work.md) | The evolution from statistical models to Transformers, how attention works, emergent abilities, and a timeline of key models |
 | [Training & Fine-Tuning](training-and-fine-tuning.md) | Pre-training objectives, SFT, RLHF, DPO, and practical considerations for training and adapting LLMs |
+| [Tokenization](tokenization.md) | BPE, WordPiece, SentencePiece, and tiktoken -- how text becomes tokens, and why tokenizer choice affects cost, multilingual support, and model behavior |
+| [Prompting Techniques](prompting-techniques.md) | Zero-shot, few-shot, Chain-of-Thought, Tree-of-Thought, Self-Consistency, and structured output techniques with a decision framework |
+| [Evaluation & Benchmarks](evaluation-and-benchmarks.md) | MMLU, HumanEval, GSM8K, MT-Bench, Chatbot Arena, HELM, LM Eval Harness -- what they measure, their limitations, and how to build your own evaluations |
+| [Inference Optimization](inference-optimization.md) | KV caching, quantization (GPTQ, AWQ, GGUF), Flash Attention, speculative decoding, continuous batching, and knowledge distillation |
 
 ## Suggested Reading Order
 
 1. Start with **How LLMs Work** to understand what these models are and how they evolved
 2. Then read **Training & Fine-Tuning** to understand how raw models become useful assistants
+3. Read **Tokenization** to understand the critical first step in the LLM pipeline
+4. Move to **Prompting Techniques** to learn how to effectively communicate with LLMs
+5. Read **Evaluation & Benchmarks** to understand how model quality is measured and compared
+6. Finish with **Inference Optimization** to learn how LLMs are deployed efficiently in production

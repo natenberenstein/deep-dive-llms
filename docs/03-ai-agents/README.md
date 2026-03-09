@@ -34,9 +34,15 @@ graph TD
 | Page | What You'll Learn |
 |---|---|
 | [Agent Fundamentals](agent-fundamentals.md) | What makes an LLM an "agent," ReAct pattern, tool use, memory, and planning |
+| [Tool Design Patterns](tool-design-patterns.md) | API wrapping, JSON Schema best practices, error handling, composition, and safety |
 | [Multi-Agent Architectures](multi-agent-architectures.md) | Single vs. multi-agent tradeoffs, common patterns, LangChain, and LangGraph |
+| [Agent Frameworks](agent-frameworks.md) | Claude Agent SDK, OpenAI Assistants, LangGraph, CrewAI, AutoGen compared |
+| [Agent Evaluation and Safety](agent-evaluation-and-safety.md) | Evaluation dimensions, guardrails, sandboxing, failure modes, and monitoring |
 
 ## Suggested Reading Order
 
 1. Start with **Agent Fundamentals** to understand the core concepts: reasoning loops, tool use, and memory
-2. Then read **Multi-Agent Architectures** to learn how to compose agents into systems
+2. Then read **Tool Design Patterns** to learn how to build reliable tools for agents
+3. Then read **Multi-Agent Architectures** to learn how to compose agents into systems
+4. Then read **Agent Frameworks** to compare the available frameworks and choose one
+5. Finally, **Agent Evaluation and Safety** for testing, guardrails, and production monitoring
