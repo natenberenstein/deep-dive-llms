@@ -96,14 +96,20 @@ git lfs install
 
 > **Air-gapped note:** If `git lfs` is unavailable or blocked, you can download `.safetensors` weight files individually from the ModelScope web interface and place them in the model directory manually. The directory structure must match what the model's `config.json` expects.
 
-### 2. Docker (Recommended)
+### 2. Docker and NVIDIA Container Toolkit
 
-NVIDIA provides a pre-built vLLM Docker image optimized for DGX Spark's sm_121 architecture:
+NVIDIA provides a pre-built vLLM Docker image optimized for DGX Spark's sm_121 architecture. Ensure Docker is configured for GPU access:
 
 ```bash
 # Verify Docker and NVIDIA Container Toolkit are installed
 docker --version
 nvidia-smi
+
+# Ensure your user can run Docker without sudo
+sudo usermod -aG docker $USER
+newgrp docker
+
+# Verify GPU access from Docker
 docker run --rm --gpus all nvidia/cuda:12.8-base nvidia-smi
 ```
 
@@ -116,7 +122,32 @@ docker run --rm --gpus all nvidia/cuda:12.8-base nvidia-smi
 | **NVIDIA's pre-built vLLM container** | Works out of the box, tested for DGX Spark | May lag behind upstream vLLM features |
 | **Build vLLM from source** | Latest features, full control | Requires patching Triton for sm_121, more complex setup |
 
+The NVIDIA container is available from NGC. As of this writing, the latest version is `26.02-py3`:
+
+```bash
+# Set the version (check https://build.nvidia.com/spark/vllm for the latest)
+export VLLM_VERSION=26.02-py3
+docker pull nvcr.io/nvidia/vllm:${VLLM_VERSION}
+```
+
+**System requirements:** CUDA 13.0 toolkit, Python 3.12, Docker with NVIDIA Container Toolkit.
+
 The `--enforce-eager` flag is **required** on DGX Spark — it disables CUDA graph optimizations that aren't compatible with sm_121. This results in approximately 20-30% slower inference compared to CUDA graph mode on supported architectures, but it is the only reliable option.
+
+### NVIDIA-Quantized Models for DGX Spark
+
+NVIDIA provides pre-quantized models optimized for DGX Spark on [build.nvidia.com](https://build.nvidia.com/spark/vllm). These use NVFP4 and FP8 formats tuned for Blackwell:
+
+| Model | Quantization | Handle |
+|---|---|---|
+| Llama-3.1-8B-Instruct | FP8 / NVFP4 | `nvidia/Llama-3.1-8B-Instruct-FP8` |
+| Llama-3.3-70B-Instruct | NVFP4 | `nvidia/Llama-3.3-70B-Instruct-NVFP4` |
+| Qwen3-8B | FP8 / NVFP4 | `nvidia/Qwen3-8B-FP8` |
+| Nemotron-3-Super-120B-A12B | FP8 | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8` |
+| Nemotron-3-Nano-30B-A3B | BF16 / FP8 | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` |
+| Phi-4-multimodal-instruct | FP8 / NVFP4 | `nvidia/Phi-4-multimodal-instruct-FP8` |
+
+> These can be used as an alternative to ModelScope models if your network allows pulling from Hugging Face via the NVIDIA container's built-in download. If not, the ModelScope git clone approach described below still applies.
 
 ## Acquiring Models in a Restricted Network
 
@@ -168,8 +199,9 @@ Use this section to validate your setup on a single DGX Spark before deploying t
 ### 1.1 Pull the vLLM Container
 
 ```bash
-# NVIDIA's DGX Spark optimized image
-docker pull nvcr.io/nvidia/vllm:dgx-spark-latest
+# NVIDIA's DGX Spark optimized image (check https://build.nvidia.com/spark/vllm for latest tag)
+export VLLM_VERSION=26.02-py3
+docker pull nvcr.io/nvidia/vllm:${VLLM_VERSION}
 ```
 
 > If pulling from a registry is not possible on your network, you can export the image on a machine with access (`docker save`) and import it on the DGX Spark (`docker load`).
@@ -180,7 +212,7 @@ docker pull nvcr.io/nvidia/vllm:dgx-spark-latest
 docker run --rm --gpus all \
   -v /models/Qwen3-Embedding-8B:/model \
   -p 8000:8000 \
-  nvcr.io/nvidia/vllm:dgx-spark-latest \
+  nvcr.io/nvidia/vllm:${VLLM_VERSION:-26.02-py3} \
   vllm serve /model \
     --task embed \
     --host 0.0.0.0 \
@@ -227,7 +259,7 @@ Stop the embedding container first (or use a different port), then:
 docker run --rm --gpus all \
   -v /models/Qwen3-8B:/model \
   -p 8001:8001 \
-  nvcr.io/nvidia/vllm:dgx-spark-latest \
+  nvcr.io/nvidia/vllm:${VLLM_VERSION:-26.02-py3} \
   vllm serve /model \
     --host 0.0.0.0 \
     --port 8001 \
@@ -259,7 +291,7 @@ An 8B embedding model (~16 GB) and an 8B chat model (~16 GB) can coexist on one 
 docker run --rm --gpus all \
   -v /models/Qwen3-Embedding-8B:/model \
   -p 8000:8000 \
-  nvcr.io/nvidia/vllm:dgx-spark-latest \
+  nvcr.io/nvidia/vllm:${VLLM_VERSION:-26.02-py3} \
   vllm serve /model \
     --task embed \
     --host 0.0.0.0 --port 8000 \
@@ -271,7 +303,7 @@ docker run --rm --gpus all \
 docker run --rm --gpus all \
   -v /models/Qwen3-8B:/model \
   -p 8001:8001 \
-  nvcr.io/nvidia/vllm:dgx-spark-latest \
+  nvcr.io/nvidia/vllm:${VLLM_VERSION:-26.02-py3} \
   vllm serve /model \
     --host 0.0.0.0 --port 8001 \
     --max-model-len 8192 \
@@ -355,7 +387,7 @@ Create a systemd service or use Docker Compose for persistence:
 # /opt/vllm/docker-compose.yml on DGX Spark #1
 services:
   vllm-embedding:
-    image: nvcr.io/nvidia/vllm:dgx-spark-latest
+    image: nvcr.io/nvidia/vllm:${VLLM_VERSION:-26.02-py3}
     runtime: nvidia
     ports:
       - "8000:8000"
@@ -390,7 +422,7 @@ cd /opt/vllm && docker compose up -d
 # /opt/vllm/docker-compose.yml on DGX Spark #2
 services:
   vllm-chat:
-    image: nvcr.io/nvidia/vllm:dgx-spark-latest
+    image: nvcr.io/nvidia/vllm:${VLLM_VERSION:-26.02-py3}
     runtime: nvidia
     ports:
       - "8000:8000"
@@ -807,7 +839,7 @@ vLLM auto-detects the quantization format from the model config:
 docker run --rm --gpus all \
   -v /models/Qwen3-72B-AWQ:/model \
   -p 8000:8000 \
-  nvcr.io/nvidia/vllm:dgx-spark-latest \
+  nvcr.io/nvidia/vllm:${VLLM_VERSION:-26.02-py3} \
   vllm serve /model \
     --host 0.0.0.0 \
     --port 8000 \
@@ -871,6 +903,55 @@ graph LR
 
 Node #1 runs the lightweight embedding and reranker models with plenty of headroom. Node #2 dedicates its full 128 GB to the quantized 72B chat model, leaving ~90 GB for KV cache and concurrent requests.
 
+### Multi-Node Tensor Parallelism (Advanced)
+
+For models too large to fit on a single DGX Spark even with quantization, NVIDIA's vLLM container supports **tensor parallelism across two Sparks** connected via a QSFP cable. This pools both nodes' memory (256 GB total) and uses Ray for distributed coordination.
+
+**Prerequisites:**
+- Connect the two DGX Sparks with a QSFP cable (high-speed direct link)
+- Configure passwordless SSH between the nodes
+- Download the Ray cluster deployment script from [build.nvidia.com/spark/vllm](https://build.nvidia.com/spark/vllm)
+
+**On Node 1 (head):**
+
+```bash
+export MN_IF_NAME=enp1s0f1np1  # QSFP network interface
+export VLLM_HOST_IP=$(ip -4 addr show $MN_IF_NAME | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+export VLLM_IMAGE=nvcr.io/nvidia/vllm:${VLLM_VERSION:-26.02-py3}
+
+bash run_cluster.sh $VLLM_IMAGE $VLLM_HOST_IP --head ~/.cache/huggingface \
+  -e VLLM_HOST_IP=$VLLM_HOST_IP \
+  -e UCX_NET_DEVICES=$MN_IF_NAME \
+  -e NCCL_SOCKET_IFNAME=$MN_IF_NAME \
+  -e OMPI_MCA_btl_tcp_if_include=$MN_IF_NAME \
+  -e GLOO_SOCKET_IFNAME=$MN_IF_NAME \
+  -e TP_SOCKET_IFNAME=$MN_IF_NAME \
+  -e RAY_memory_monitor_refresh_ms=0 \
+  -e MASTER_ADDR=$VLLM_HOST_IP
+```
+
+**On Node 2 (worker):**
+
+```bash
+export HEAD_NODE_IP=<NODE_1_IP_ADDRESS>
+export VLLM_HOST_IP=$(ip -4 addr show enp1s0f1np1 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+
+bash run_cluster.sh $VLLM_IMAGE $HEAD_NODE_IP --worker ~/.cache/huggingface \
+  -e VLLM_HOST_IP=$VLLM_HOST_IP \
+  -e NCCL_SOCKET_IFNAME=enp1s0f1np1 \
+  -e MASTER_ADDR=$HEAD_NODE_IP
+```
+
+**Serve a model with tensor parallelism across both nodes:**
+
+```bash
+docker exec $VLLM_CONTAINER /bin/bash -c \
+  'vllm serve meta-llama/Llama-3.3-70B-Instruct \
+   --tensor-parallel-size 2 --max_model_len 2048'
+```
+
+> **Trade-off:** Multi-node TP enables larger models (e.g., full FP16 70B across 2 nodes) but adds inter-node communication latency. For most use cases, single-node with quantization (INT4 72B on one Spark) will give better throughput. Use multi-node TP when you need full-precision weights or the model simply won't fit on one node even quantized.
+
 ---
 
 ## Zero-Downtime Model Updates
@@ -916,7 +997,7 @@ git clone https://www.modelscope.ai/Qwen/Qwen3.5-8B.git /models/Qwen3.5-8B
 docker run -d --name vllm-chat-new --gpus all \
   -v /models/Qwen3.5-8B:/model \
   -p 8001:8001 \
-  nvcr.io/nvidia/vllm:dgx-spark-latest \
+  nvcr.io/nvidia/vllm:${VLLM_VERSION:-26.02-py3} \
   vllm serve /model \
     --host 0.0.0.0 --port 8001 \
     --max-model-len 8192 \
@@ -968,7 +1049,7 @@ docker stop vllm-chat-new && docker rm vllm-chat-new
 docker run -d --name vllm-chat --gpus all \
   -v /models/Qwen3.5-8B:/model \
   -p 8000:8000 \
-  nvcr.io/nvidia/vllm:dgx-spark-latest \
+  nvcr.io/nvidia/vllm:${VLLM_VERSION:-26.02-py3} \
   vllm serve /model \
     --host 0.0.0.0 --port 8000 \
     --max-model-len 8192 \
@@ -1036,7 +1117,7 @@ services:
     # ... (existing chat config, gpu-memory-utilization: 0.7)
 
   vllm-embed-backup:
-    image: nvcr.io/nvidia/vllm:dgx-spark-latest
+    image: nvcr.io/nvidia/vllm:${VLLM_VERSION:-26.02-py3}
     runtime: nvidia
     ports:
       - "8001:8001"
@@ -1144,6 +1225,11 @@ nvidia-smi --query-gpu=compute_cap --format=csv
 - Lower `--max-model-len` (e.g., 4096)
 - Use a quantized model variant (INT4/INT8)
 - Don't run other GPU workloads alongside vLLM — the 128 GB is unified and shared
+- **Flush the Linux buffer cache** — DGX Spark's unified memory architecture means the OS buffer cache competes with the GPU for the same 128 GB. If the model should fit but OOM still occurs, flush the cache:
+
+```bash
+sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
+```
 
 ### LiteLLM can't reach vLLM backends
 
@@ -1191,7 +1277,7 @@ This is expected on DGX Spark due to `--enforce-eager`. The sm_121 architecture 
 3. [NVIDIA DGX Spark In-Depth Review (LMSYS)](https://lmsys.org/blog/2025-10-13-nvidia-dgx-spark/) — Performance benchmarks and analysis
 
 ### vLLM on DGX Spark
-4. [vLLM for DGX Spark (NVIDIA)](https://build.nvidia.com/spark/vllm) — NVIDIA's optimized vLLM container
+4. [vLLM for DGX Spark (NVIDIA)](https://build.nvidia.com/spark/vllm) — NVIDIA's optimized vLLM container, supported models, multi-node setup with Ray, and DGX Spark-specific configuration
 5. [vLLM DGX Spark Compatibility Discussion](https://discuss.vllm.ai/t/nvidia-dgx-spark-compatibility/1756) — Community discussion on sm_121 support
 6. [vLLM Installation on DGX Spark Guide](https://medium.com/@stablehigashi/vllm-installation-on-dgx-spark-gb10-sm-121-and-qwen-3-5-serving-guide-9eba91e448f8) — Step-by-step source build guide
 7. [Building vLLM from Source on DGX Spark](https://medium.com/@anveshkumarchavidi/installing-vllm-on-nvidia-dgx-spark-from-source-4dde137ff3ef) — Alternative source build approach
