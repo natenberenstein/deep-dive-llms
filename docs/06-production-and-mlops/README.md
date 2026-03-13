@@ -52,6 +52,7 @@ graph TD
 | [Observability](observability.md) | LLM observability vs traditional monitoring, tracing and logging for LLM pipelines, cost tracking, quality monitoring, and tools (LangSmith, Langfuse, Phoenix, OpenLLMetry) |
 | [Caching Strategies](caching-strategies.md) | Exact match caching, semantic caching, prompt caching (Anthropic/OpenAI), KV cache reuse, invalidation strategies, and when NOT to cache |
 | [LLM CI/CD](llm-ci-cd.md) | Testing LLM outputs, eval-driven development, A/B testing, prompt versioning, regression testing, and CI/CD pipeline integration |
+| [Self-Hosting LLMs on DGX Spark](self-hosting-llms-on-dgx-spark.md) | End-to-end guide for deploying embedding and chat models on NVIDIA DGX Spark with vLLM and LiteLLM — local testing, production deployment, client integration, and troubleshooting for air-gapped networks |
 
 ## Suggested Reading Order
 
