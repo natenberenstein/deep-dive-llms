@@ -11,6 +11,9 @@
 - [Part 2: Production Deployment](#part-2-production-deployment)
 - [Part 3: Client Integration](#part-3-client-integration)
 - [Monitoring and Observability](#monitoring-and-observability)
+- [Quantization: Running Larger Models](#quantization-running-larger-models)
+- [Zero-Downtime Model Updates](#zero-downtime-model-updates)
+- [Redundancy and Failure Handling](#redundancy-and-failure-handling)
 - [Troubleshooting](#troubleshooting)
 - [Key Takeaways](#key-takeaways)
 - [References](#references)
@@ -758,6 +761,360 @@ scrape_configs:
 
 ---
 
+## Quantization: Running Larger Models
+
+Quantization reduces the precision of model weights (e.g., FP16 to INT4), dramatically cutting memory usage with minimal quality loss. On DGX Spark's 128 GB unified memory, quantization is what unlocks 70B+ models.
+
+### Why Quantize?
+
+| Model | FP16 Memory | INT4 (GPTQ/AWQ) Memory | Fits on DGX Spark? |
+|---|---|---|---|
+| Qwen3-8B | ~16 GB | ~4 GB | FP16: Yes, INT4: Yes |
+| Qwen3-32B | ~64 GB | ~16 GB | FP16: Yes (tight), INT4: Yes (comfortable) |
+| Qwen3-72B | ~144 GB | ~36 GB | FP16: **No**, INT4: **Yes** |
+| Qwen3-235B-A22B (MoE) | ~470 GB | ~118 GB | FP16: No, INT4: Yes (tight) |
+
+**INT4 quantization typically loses 1-3% on benchmarks** — for most practical applications (chat, RAG, summarization), users won't notice the difference.
+
+### Quantization Formats Supported by vLLM
+
+| Format | How It Works | Best For |
+|---|---|---|
+| **AWQ** | Activation-aware quantization — preserves weights that matter most to output quality | Best overall quality at INT4. Recommended for production. |
+| **GPTQ** | Post-training quantization using calibration data | Widely available, good quality. Slightly slower than AWQ on some hardware. |
+| **FP8** | 8-bit floating point — higher quality than INT4, uses more memory | When you have memory headroom but want speedup over FP16 |
+| **BitsAndBytes (NF4)** | Normal-float 4-bit, used primarily for fine-tuning | Fine-tuning with QLoRA. Not ideal for serving. |
+
+### Getting Quantized Models from ModelScope
+
+Many popular models have pre-quantized variants available:
+
+```bash
+# AWQ quantized (recommended)
+git clone https://www.modelscope.ai/Qwen/Qwen3-72B-AWQ.git /models/Qwen3-72B-AWQ
+
+# GPTQ quantized
+git clone https://www.modelscope.ai/Qwen/Qwen3-72B-GPTQ-Int4.git /models/Qwen3-72B-GPTQ-Int4
+```
+
+> **Tip:** Always check ModelScope for pre-quantized variants before quantizing yourself. Search for the model name with `-AWQ`, `-GPTQ-Int4`, or `-GPTQ-Int8` suffixes.
+
+### Serving a Quantized Model
+
+vLLM auto-detects the quantization format from the model config:
+
+```bash
+docker run --rm --gpus all \
+  -v /models/Qwen3-72B-AWQ:/model \
+  -p 8000:8000 \
+  nvcr.io/nvidia/vllm:dgx-spark-latest \
+  vllm serve /model \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --max-model-len 4096 \
+    --enforce-eager \
+    --gpu-memory-utilization 0.9
+```
+
+Note: `--dtype` is not needed — vLLM reads the quantization config from the model's `config.json` or `quantize_config.json`.
+
+### Quantizing a Model Yourself
+
+If a pre-quantized variant isn't available on ModelScope, you can quantize locally using AutoAWQ:
+
+```bash
+pip install autoawq
+```
+
+```python
+from awq import AutoAWQForCausalLM
+from transformers import AutoTokenizer
+
+model_path = "/models/Qwen3-32B"
+quant_path = "/models/Qwen3-32B-AWQ"
+
+# Load model
+model = AutoAWQForCausalLM.from_pretrained(model_path)
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+# Quantize — requires calibration data (a small sample of text)
+model.quantize(
+    tokenizer,
+    quant_config={"zero_point": True, "q_group_size": 128, "w_bit": 4},
+)
+
+# Save
+model.save_quantized(quant_path)
+tokenizer.save_pretrained(quant_path)
+```
+
+> **Warning:** Quantization itself requires loading the full FP16 model into memory. For a 72B model (~144 GB), you cannot quantize on a single DGX Spark. Either quantize on a machine with more memory, or download a pre-quantized variant.
+
+### Recommended Setup with Quantization
+
+With quantization, you can unlock a much stronger architecture:
+
+```mermaid
+graph LR
+    subgraph "DGX Spark #1"
+        E["Qwen3-Embedding-8B<br/>FP16 (~16 GB)"]
+        R["Qwen3-Reranker-0.6B<br/>FP16 (~1.2 GB)"]
+    end
+    subgraph "DGX Spark #2"
+        C["Qwen3-72B-AWQ<br/>INT4 (~36 GB)"]
+    end
+
+    style E fill:#3498db,stroke:#2980b9,color:#fff
+    style R fill:#3498db,stroke:#2980b9,color:#fff
+    style C fill:#2ecc71,stroke:#27ae60,color:#fff
+```
+
+Node #1 runs the lightweight embedding and reranker models with plenty of headroom. Node #2 dedicates its full 128 GB to the quantized 72B chat model, leaving ~90 GB for KV cache and concurrent requests.
+
+---
+
+## Zero-Downtime Model Updates
+
+When a new model version is released (e.g., Qwen3.5), you need to swap it in without dropping user requests.
+
+### Strategy: Blue-Green Deployment on a Single Node
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant LiteLLM
+    participant vLLM_Old as vLLM (port 8000)
+    participant vLLM_New as vLLM (port 8001)
+
+    Note over vLLM_Old: Serving current model
+    User->>LiteLLM: Request
+    LiteLLM->>vLLM_Old: Forward
+    vLLM_Old-->>User: Response
+
+    Note over vLLM_New: Start new model on different port
+    Note over vLLM_New: Verify health + smoke test
+
+    Note over LiteLLM: Update config to point to port 8001
+    User->>LiteLLM: Request
+    LiteLLM->>vLLM_New: Forward
+    vLLM_New-->>User: Response
+
+    Note over vLLM_Old: Stop old container
+```
+
+### Step-by-Step
+
+**1. Clone the new model alongside the old one:**
+
+```bash
+git clone https://www.modelscope.ai/Qwen/Qwen3.5-8B.git /models/Qwen3.5-8B
+```
+
+**2. Start a new vLLM instance on a different port:**
+
+```bash
+docker run -d --name vllm-chat-new --gpus all \
+  -v /models/Qwen3.5-8B:/model \
+  -p 8001:8001 \
+  nvcr.io/nvidia/vllm:dgx-spark-latest \
+  vllm serve /model \
+    --host 0.0.0.0 --port 8001 \
+    --max-model-len 8192 \
+    --enforce-eager --dtype float16 \
+    --gpu-memory-utilization 0.4
+```
+
+Use `--gpu-memory-utilization 0.4` so both old and new instances coexist temporarily.
+
+**3. Verify the new model works:**
+
+```bash
+curl http://localhost:8001/health
+curl http://localhost:8001/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"/model","messages":[{"role":"user","content":"Hello"}],"max_tokens":16}'
+```
+
+**4. Update LiteLLM to point to the new instance:**
+
+Edit `/opt/litellm/config.yaml`:
+
+```yaml
+  - model_name: qwen3-chat
+    litellm_params:
+      model: openai/Qwen3.5-8B
+      api_base: http://10.x.x.11:8001/v1    # ← new port
+      api_key: unused
+```
+
+Restart LiteLLM (takes seconds, much faster than model loading):
+
+```bash
+cd /opt/litellm && docker compose restart
+```
+
+**5. Stop the old container and reclaim resources:**
+
+```bash
+docker stop vllm-chat-old && docker rm vllm-chat-old
+```
+
+**6. (Optional) Restart the new container at full memory utilization:**
+
+Now that the old container is gone, restart with `--gpu-memory-utilization 0.9` for maximum throughput:
+
+```bash
+docker stop vllm-chat-new && docker rm vllm-chat-new
+docker run -d --name vllm-chat --gpus all \
+  -v /models/Qwen3.5-8B:/model \
+  -p 8000:8000 \
+  nvcr.io/nvidia/vllm:dgx-spark-latest \
+  vllm serve /model \
+    --host 0.0.0.0 --port 8000 \
+    --max-model-len 8192 \
+    --enforce-eager --dtype float16 \
+    --gpu-memory-utilization 0.9
+```
+
+Update LiteLLM config back to port 8000 and restart.
+
+> **Downtime window:** The only user-facing disruption is the LiteLLM restart (~2-3 seconds). The new model is already warm and serving before the switch.
+
+---
+
+## Redundancy and Failure Handling
+
+With only 2 DGX Spark nodes, full high-availability isn't practical — but you can minimize the blast radius of failures.
+
+### What Happens When a Node Goes Down?
+
+| Failure | Impact | Mitigation |
+|---|---|---|
+| **Spark #1 (embedding) goes down** | RAG pipelines break, no new embeddings | Run a small backup embedding instance on Spark #2 |
+| **Spark #2 (chat) goes down** | No chat completions | Users get clear error from LiteLLM, not a timeout |
+| **LiteLLM goes down** | All requests fail | Run LiteLLM on both nodes behind a shared DNS |
+| **Network issue between LiteLLM and vLLM** | Requests timeout | LiteLLM health checks detect and surface the issue |
+
+### LiteLLM Health Checks
+
+LiteLLM can actively health-check backends and return clear errors instead of hanging:
+
+```yaml
+# litellm config.yaml
+model_list:
+  - model_name: qwen3-embed
+    litellm_params:
+      model: openai/Qwen3-Embedding-8B
+      api_base: http://10.x.x.10:8000/v1
+      api_key: unused
+    model_info:
+      health_check_model: Qwen3-Embedding-8B  # vLLM model name for health check
+
+  - model_name: qwen3-chat
+    litellm_params:
+      model: openai/Qwen3-8B
+      api_base: http://10.x.x.11:8000/v1
+      api_key: unused
+    model_info:
+      health_check_model: Qwen3-8B
+
+general_settings:
+  health_check_interval: 30  # seconds
+```
+
+When a backend is unhealthy, LiteLLM returns a clear error message immediately instead of making users wait for a TCP timeout.
+
+### Backup Embedding Instance
+
+If your embedding pipeline is critical (e.g., production RAG), run a small backup on the chat node:
+
+```yaml
+# On DGX Spark #2, alongside the chat model
+# docker-compose.yml
+services:
+  vllm-chat:
+    # ... (existing chat config, gpu-memory-utilization: 0.7)
+
+  vllm-embed-backup:
+    image: nvcr.io/nvidia/vllm:dgx-spark-latest
+    runtime: nvidia
+    ports:
+      - "8001:8001"
+    volumes:
+      - /models/Qwen3-Embedding-8B:/model
+    command: >
+      vllm serve /model
+        --task embed
+        --host 0.0.0.0
+        --port 8001
+        --max-model-len 4096
+        --enforce-eager
+        --dtype float16
+        --gpu-memory-utilization 0.15
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+```
+
+Then configure LiteLLM with both embedding backends as fallbacks:
+
+```yaml
+model_list:
+  - model_name: qwen3-embed
+    litellm_params:
+      model: openai/Qwen3-Embedding-8B
+      api_base: http://10.x.x.10:8000/v1      # primary
+      api_key: unused
+
+  - model_name: qwen3-embed
+    litellm_params:
+      model: openai/Qwen3-Embedding-8B
+      api_base: http://10.x.x.11:8001/v1      # backup on chat node
+      api_key: unused
+
+router_settings:
+  routing_strategy: latency-based-routing      # sends to fastest healthy backend
+  num_retries: 2                               # retry on another backend if one fails
+  allowed_fails: 2                             # mark backend unhealthy after 2 consecutive failures
+```
+
+LiteLLM will automatically route embedding requests to the backup if the primary is down.
+
+### Simple Uptime Monitoring
+
+A lightweight health check script, run via cron every minute:
+
+```bash
+#!/bin/bash
+# /opt/monitoring/health_check.sh
+
+ENDPOINTS=(
+  "http://10.x.x.10:8000/health"
+  "http://10.x.x.11:8000/health"
+  "http://localhost:4000/health"
+)
+
+for url in "${ENDPOINTS[@]}"; do
+  if ! curl -sf --max-time 5 "$url" > /dev/null 2>&1; then
+    echo "$(date): UNHEALTHY — $url" >> /var/log/llm-health.log
+    # Optional: send alert via email, Slack webhook, etc.
+    # curl -X POST https://hooks.slack.com/... -d "{\"text\": \"LLM endpoint down: $url\"}"
+  fi
+done
+```
+
+```bash
+# Add to crontab
+echo "* * * * * /opt/monitoring/health_check.sh" | crontab -
+```
+
+---
+
 ## Troubleshooting
 
 ### Model files are 130 bytes (LFS pointers, not actual weights)
@@ -810,15 +1167,21 @@ This is expected on DGX Spark due to `--enforce-eager`. The sm_121 architecture 
 
 2. **128 GB unified memory is generous but shared** — an 8B model in FP16 uses ~16 GB, leaving plenty of room. But don't run other heavy workloads alongside vLLM.
 
-3. **One model per node for production** — dedicating each DGX Spark to a single model maximizes KV cache memory and concurrent request throughput.
+3. **Quantization unlocks larger models** — INT4 (AWQ/GPTQ) cuts memory by 75% with 1-3% quality loss. A 72B model that won't fit in FP16 (144 GB) fits comfortably quantized (~36 GB). Always check ModelScope for pre-quantized variants before quantizing yourself.
 
-4. **LiteLLM is the right abstraction layer** — it turns two separate vLLM instances into a single, manageable API gateway with clean model names, API keys, and usage tracking.
+4. **One model per node for production** — dedicating each DGX Spark to a single model maximizes KV cache memory and concurrent request throughput. With quantization, consider embedding + reranker on node #1, and a large quantized chat model on node #2.
 
-5. **Git LFS is the most common gotcha** — always verify that cloned model files are actual weights (multiple GB), not 130-byte LFS pointers.
+5. **LiteLLM is the right abstraction layer** — it turns multiple vLLM instances into a single API gateway with clean model names, API keys, usage tracking, health checks, and automatic failover between backends.
 
-6. **Any OpenAI SDK client works** — because both vLLM and LiteLLM expose OpenAI-compatible APIs, users can integrate with Python, TypeScript, curl, LangChain, or any tool that supports the OpenAI API format.
+6. **Plan for model updates** — use blue-green deployment (new model on a different port, verify, switch LiteLLM config, stop old container) to avoid downtime. The only disruption is the LiteLLM restart (~2-3 seconds).
 
-7. **Start with local testing, then go to production** — validate on a single node with the smoke test script before deploying Docker Compose services and the LiteLLM gateway.
+7. **Build in redundancy where it matters** — with 2 nodes you can't have full HA, but running a backup embedding instance on the chat node and configuring LiteLLM's fallback routing handles the most common failure scenarios.
+
+8. **Git LFS is the most common gotcha** — always verify that cloned model files are actual weights (multiple GB), not 130-byte LFS pointers.
+
+9. **Any OpenAI SDK client works** — because both vLLM and LiteLLM expose OpenAI-compatible APIs, users can integrate with Python, TypeScript, curl, LangChain, or any tool that supports the OpenAI API format.
+
+10. **Start with local testing, then go to production** — validate on a single node with the smoke test script before deploying Docker Compose services and the LiteLLM gateway.
 
 ## References
 
