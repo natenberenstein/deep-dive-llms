@@ -64,6 +64,7 @@ graph LR
 ### 4. AI Agents
 - [Section Overview](docs/03-ai-agents/README.md)
 - [Agent Fundamentals](docs/03-ai-agents/agent-fundamentals.md) — ReAct, tool use, memory, planning
+- [Memory and State Management](docs/03-ai-agents/memory-and-state-management.md) — Conversation memory, long-term recall, episodic memory, state machines, checkpointing
 - [Multi-Agent Architectures](docs/03-ai-agents/multi-agent-architectures.md) — Patterns, LangChain, LangGraph
 
 ### Resources
@@ -88,7 +89,9 @@ graph LR
 | Optimize energy efficiency | [Energy Efficiency](docs/04-hardware-and-infrastructure/energy-efficiency.md) |
 | Build or improve a RAG pipeline | [Chunking Strategies](docs/02-retrieval-augmented-generation/chunking-strategies.md) |
 | Choose a vector database | [Vector Databases](docs/02-retrieval-augmented-generation/vector-databases.md) |
+| Understand long context and when to use it vs. RAG | [Long Context and Context Windows](docs/01-llm-foundations/long-context-and-context-windows.md) |
 | Understand AI agents | [Agent Fundamentals](docs/03-ai-agents/agent-fundamentals.md) |
+| Design agent memory systems | [Memory and State Management](docs/03-ai-agents/memory-and-state-management.md) |
 | Design multi-agent systems | [Multi-Agent Architectures](docs/03-ai-agents/multi-agent-architectures.md) |
 | Find key papers to read | [Papers](resources/papers.md) |
 | Choose hardware for training/inference | [Hardware for LLMs](resources/hardware-for-llms.md) |
