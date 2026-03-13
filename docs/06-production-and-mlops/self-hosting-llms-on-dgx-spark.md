@@ -32,10 +32,12 @@ This guide assumes the following environment:
 
 ```mermaid
 graph LR
-    A[Users] -->|OpenAI SDK| B[LiteLLM Gateway]
+    A[Users] -->|OpenAI SDK| N["nginx<br/>llms.skhms.com"]
+    N --> B[LiteLLM Gateway]
     B -->|"model: qwen3-embed"| C["DGX Spark #1<br/>vLLM — Embedding"]
     B -->|"model: qwen3-chat"| D["DGX Spark #2<br/>vLLM — Chat"]
 
+    style N fill:#9b59b6,stroke:#8e44ad,color:#fff
     style B fill:#f39c12,stroke:#c87f0a,color:#fff
     style C fill:#3498db,stroke:#2980b9,color:#fff
     style D fill:#2ecc71,stroke:#27ae60,color:#fff
@@ -316,19 +318,22 @@ python smoke_test.py
 ```mermaid
 graph TD
     Users["Users<br/>(OpenAI SDK, curl, apps)"]
-    LiteLLM["LiteLLM Proxy<br/>llm-gateway.internal:4000"]
+    Nginx["nginx Reverse Proxy<br/>llms.skhms.com:80/443"]
+    LiteLLM["LiteLLM Proxy<br/>localhost:4000"]
     Spark1["DGX Spark #1<br/>vLLM — Embedding<br/>10.x.x.10:8000"]
     Spark2["DGX Spark #2<br/>vLLM — Chat<br/>10.x.x.11:8000"]
     Prometheus["Prometheus"]
     Grafana["Grafana Dashboard"]
 
-    Users -->|"POST /v1/embeddings<br/>POST /v1/chat/completions"| LiteLLM
+    Users -->|"POST /v1/embeddings<br/>POST /v1/chat/completions"| Nginx
+    Nginx --> LiteLLM
     LiteLLM -->|"model: qwen3-embed"| Spark1
     LiteLLM -->|"model: qwen3-chat"| Spark2
     Spark1 -->|"/metrics"| Prometheus
     Spark2 -->|"/metrics"| Prometheus
     Prometheus --> Grafana
 
+    style Nginx fill:#9b59b6,stroke:#8e44ad,color:#fff
     style LiteLLM fill:#f39c12,stroke:#c87f0a,color:#fff
     style Spark1 fill:#3498db,stroke:#2980b9,color:#fff
     style Spark2 fill:#2ecc71,stroke:#27ae60,color:#fff
@@ -456,7 +461,7 @@ cd /opt/litellm && docker compose up -d
 LiteLLM supports creating per-user or per-team API keys:
 
 ```bash
-# Create a key for a team
+# Create a key for a team (use llm-gateway.internal:4000 or llms.skhms.com)
 curl http://llm-gateway.internal:4000/key/generate \
   -H "Authorization: Bearer sk-change-this-to-a-secure-key" \
   -H "Content-Type: application/json" \
@@ -469,28 +474,138 @@ curl http://llm-gateway.internal:4000/key/generate \
 
 This returns a key like `sk-abc123...` that users include in their requests. LiteLLM tracks usage per key.
 
-### 2.6 DNS / Service Discovery
+### 2.6 Quick Access (No DNS Required)
 
-Set up a DNS record or `/etc/hosts` entry so users can reach the gateway by name:
+Once LiteLLM is running, users can immediately access it by IP and port — no DNS, no reverse proxy, no IT tickets:
 
 ```
-# /etc/hosts or DNS
+http://10.x.x.20:4000
+```
+
+Or set a hostname via `/etc/hosts` on each client machine:
+
+```
+# /etc/hosts on client machines
 10.x.x.20  llm-gateway.internal
 ```
 
-Users then connect to `http://llm-gateway.internal:4000`.
+Then use `http://llm-gateway.internal:4000`. This is the fastest way to verify remote access works before investing in a custom domain.
+
+### 2.7 Custom Domain Setup (e.g., `llms.skhms.com`)
+
+To give users a clean URL like `http://llms.skhms.com` (no port numbers), you need two things: an internal DNS record and a reverse proxy. **No external requests or public DNS changes are required** — this is entirely within your corporate network.
+
+#### Step 1: Internal DNS Record
+
+Ask your network/IT team to create an internal DNS A record:
+
+```
+llms.skhms.com  →  A  →  10.x.x.20  (IP of the machine running LiteLLM)
+```
+
+This is configured on your company's internal DNS server (Active Directory, Bind, Infoblox, etc.). If your company uses split-horizon DNS for `skhms.com`, the record goes in the internal zone only.
+
+**For testing before DNS is set up**, you can use `/etc/hosts` on client machines:
+
+```
+# /etc/hosts
+10.x.x.20  llms.skhms.com
+```
+
+#### Step 2: Reverse Proxy (nginx)
+
+LiteLLM listens on port 4000, but users expect port 80 (HTTP) or 443 (HTTPS). Install nginx on the same machine as LiteLLM:
+
+```bash
+sudo apt-get install nginx   # Debian/Ubuntu
+```
+
+**HTTP configuration:**
+
+```nginx
+# /etc/nginx/conf.d/llms.conf
+server {
+    listen 80;
+    server_name llms.skhms.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:4000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;           # required for streaming responses
+        proxy_read_timeout 300s;       # LLM responses can take time
+        proxy_send_timeout 300s;
+    }
+}
+```
+
+**HTTPS configuration (if your company requires TLS):**
+
+Request a TLS certificate from your internal CA, then:
+
+```nginx
+# /etc/nginx/conf.d/llms.conf
+server {
+    listen 443 ssl;
+    server_name llms.skhms.com;
+
+    ssl_certificate     /etc/ssl/certs/llms.skhms.com.crt;
+    ssl_certificate_key /etc/ssl/private/llms.skhms.com.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:4000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+}
+
+# Optional: redirect HTTP to HTTPS
+server {
+    listen 80;
+    server_name llms.skhms.com;
+    return 301 https://$host$request_uri;
+}
+```
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+#### What to ask your IT team
+
+1. "Can you create an internal DNS A record for `llms.skhms.com` pointing to `10.x.x.20`?"
+2. If HTTPS is required: "Can you issue an internal TLS certificate for `llms.skhms.com`?"
+
+Users then connect to `http://llms.skhms.com` (or `https://`) with no port numbers.
 
 ---
 
 ## Part 3: Client Integration
+
+All examples below use the custom domain. If you haven't set that up yet, swap the base URL:
+
+| Setup | Base URL |
+|---|---|
+| **Quick access (no DNS)** | `http://10.x.x.20:4000/v1` or `http://llm-gateway.internal:4000/v1` |
+| **Custom domain (with nginx)** | `http://llms.skhms.com/v1` |
 
 ### Python (OpenAI SDK)
 
 ```python
 from openai import OpenAI
 
+# Use one of:
+#   "http://llm-gateway.internal:4000/v1"  (quick access, no DNS/nginx needed)
+#   "http://llms.skhms.com/v1"             (custom domain with nginx)
+BASE_URL = "http://llms.skhms.com/v1"
+
 client = OpenAI(
-    base_url="http://llm-gateway.internal:4000/v1",
+    base_url=BASE_URL,
     api_key="sk-your-team-key",
 )
 
@@ -528,14 +643,16 @@ for chunk in stream:
 ### curl
 
 ```bash
+# Replace llms.skhms.com with llm-gateway.internal:4000 if using quick access
+
 # Embedding
-curl http://llm-gateway.internal:4000/v1/embeddings \
+curl http://llms.skhms.com/v1/embeddings \
   -H "Authorization: Bearer sk-your-team-key" \
   -H "Content-Type: application/json" \
   -d '{"model": "qwen3-embed", "input": "Hello world"}'
 
 # Chat completion
-curl http://llm-gateway.internal:4000/v1/chat/completions \
+curl http://llms.skhms.com/v1/chat/completions \
   -H "Authorization: Bearer sk-your-team-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -551,7 +668,7 @@ curl http://llm-gateway.internal:4000/v1/chat/completions \
 import OpenAI from "openai";
 
 const client = new OpenAI({
-  baseURL: "http://llm-gateway.internal:4000/v1",
+  baseURL: "http://llms.skhms.com/v1",
   apiKey: "sk-your-team-key",
 });
 
@@ -577,13 +694,13 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 embeddings = OpenAIEmbeddings(
     model="qwen3-embed",
-    openai_api_base="http://llm-gateway.internal:4000/v1",
+    openai_api_base="http://llms.skhms.com/v1",
     openai_api_key="sk-your-team-key",
 )
 
 llm = ChatOpenAI(
     model="qwen3-chat",
-    openai_api_base="http://llm-gateway.internal:4000/v1",
+    openai_api_base="http://llms.skhms.com/v1",
     openai_api_key="sk-your-team-key",
 )
 
@@ -619,7 +736,7 @@ LiteLLM logs per-request usage. You can query it:
 
 ```bash
 # Get usage for a specific key
-curl http://llm-gateway.internal:4000/key/info \
+curl http://llms.skhms.com/key/info \
   -H "Authorization: Bearer sk-change-this-to-a-secure-key" \
   -d '{"key": "sk-your-team-key"}'
 ```
