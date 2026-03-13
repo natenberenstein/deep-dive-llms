@@ -214,9 +214,6 @@ docker run --rm --gpus all \
   -p 8000:8000 \
   nvcr.io/nvidia/vllm:${VLLM_VERSION:-26.02-py3} \
   vllm serve /model \
-    --task embed \
-    --host 0.0.0.0 \
-    --port 8000 \
     --max-model-len 8192 \
     --enforce-eager \
     --dtype float16
